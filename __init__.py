@@ -3,7 +3,7 @@ bl_info = {
     "description": "Tools for calculating organic vertex weights", # *Tool, just one really.
     "author": "errata-c",
     "version": (0, 1, 0),
-    "blender": (3, 3, 0), # Not a strict requirement?
+    "blender": (3, 0, 0), # Not a strict requirement?
     #"location": "Sidebar > Object > OrganicWeights",
     "warning": "",
     "category": "Object",

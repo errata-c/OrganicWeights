@@ -79,7 +79,7 @@ class VGraph:
 		#self.mesh.edges.index_update()
 
 		# Create the nodes
-		self.nodes = [VNode(i) for i in range(len(mesh.verts))]
+		self.nodes = [VNode(i) for i in range(len(self.mesh.verts))]
 		
 		# Reserved value for group ids. Monotonic increasing.
 		self.tgroup = 0
@@ -136,7 +136,7 @@ class VGraph:
 						
 						# Group check so we don't add duplicates to squeue.
 						if onode.group != cgroup:
-							squeue.append(lnode)
+							squeue.append(onode)
 							onode.group = cgroup
 
 		# Update node's layer values
@@ -145,7 +145,7 @@ class VGraph:
 
 # The actual operator implementation. Uses the above classes.
 class OrganicWeightsOperator(bpy.types.Operator):
-	bl_idname = "edit_mesh.organic_weights"
+	bl_idname = "object.organic_weights"
 	bl_label = "Calculate Organic Weights"
 	bl_options = {'REGISTER', 'UNDO'}
 	
@@ -168,24 +168,26 @@ class OrganicWeightsOperator(bpy.types.Operator):
 			context.active_object is not None and 
 			context.active_object.type == 'MESH'
 		)
-
-	def invoke(self, context, event):
-		wm = context.window_manager
-		return wm.invoke_props_dialog(self)
 	
 	def execute(self, context):
-		# Create a bmesh object for the active mesh.
-		# Currently, we don't need to use any bmesh operators.
-		bmesh_obj = bmesh.new(use_operators=False)
-		
+		print("Executed the OrganicWeightsOperator!")
+	
 		mesh_obj = context.active_object
 		mesh = mesh_obj.data
 		
-		# Should we use the from_object method instead?
-		# Should we require the mesh to be in edit mode?
-		# We don't need vertex normals or face normals.
-		bmesh_obj.from_mesh(mesh, face_normals=False, vertex_normals=False)
-
+		prior_mode = mesh_obj.mode
+	
+		# Create a bmesh object for the active mesh.
+		# Currently, we don't need to use any bmesh operators.
+		if mesh_obj.mode == 'EDIT':
+			bmesh_obj = bmesh.from_edit_mesh(mesh)
+		elif mesh_obj.mode == 'OBJECT':
+			bmesh_obj = bmesh.new()
+			bmesh_obj.from_mesh(mesh)
+		else:
+			bpy.ops.object.mode_set(mode='EDIT')
+			bmesh_obj = bmesh.from_edit_mesh(mesh)
+		
 		# For now assume that all vertex groups are being used.
 		# Later, implement some kind of exclusion method, like a whitelist or a regex test.
 
@@ -197,7 +199,7 @@ class OrganicWeightsOperator(bpy.types.Operator):
 		for i in range(len(mesh_obj.vertex_groups)):
 			vgroups.append([])
 		
-		deform_layer = bmesh_obj.verts.layers.deform.active
+		deform_layer = bmesh_obj.verts.layers.deform.verify()
 		for vert in bmesh_obj.verts:
 			dvert = vert[deform_layer]
 			
@@ -209,11 +211,6 @@ class OrganicWeightsOperator(bpy.types.Operator):
 		for group_index, verts in enumerate(vgroups):
 			for vertex_index in verts:
 				graph.branch_from(vertex_index, group_index)
-
-		# Now clear all the vertex weights (w/o removing the vertex groups)
-		for vert in bmesh_obj.verts:
-			dvert = vert[deform_layer]
-			dvert.clear()
 		
 		# Calculate the power for the falloff function
 		tmp_falloff_factor = exp(self.falloff)
@@ -224,7 +221,10 @@ class OrganicWeightsOperator(bpy.types.Operator):
 		for node in graph.nodes:
 		
 			# Find the valid vertex groups (possible to have different number of layers)
-			valid = filter(lambda l: l.index != -1, node.layers)
+			valid = []
+			for layer in node.layers:
+				if layer.index != -1:
+					valid.append(layer)
 			
 			# Calculate falloff
 			factors = [falloff_func(layer.distance) for layer in valid]
@@ -243,17 +243,38 @@ class OrganicWeightsOperator(bpy.types.Operator):
 			# Assign the new weights
 			vert = bmesh_obj.verts[node.index]
 			dvert = vert[deform_layer]
+			dvert.clear()
 			for layer, factor in zip(valid, factors):
 				dvert[layer.index] = factor * norm
+			
+			print(valid)
 		
 		# Cleanup and apply all the changes.
-		bmesh_obj.to_mesh(mesh)
-		bmesh_obj.free()
+		if bmesh_obj.is_wrapped:
+			bmesh.update_edit_mesh(mesh)
+		else:
+			bmesh_obj.to_mesh(mesh)
+			mesh.update()
+			bmesh_obj.free()
+		
+		if prior_mode != mesh_obj.mode:
+			# Is this the only way to make UI update immediately when in weight paint mode?
+			bpy.ops.object.editmode_toggle()
+			bpy.ops.object.mode_set(mode=prior_mode)
 		
 		return {'FINISHED'}
 
+def menu_func(self, context):
+	self.layout.operator(OrganicWeightsOperator.bl_idname)
+
 def register():
 	bpy.utils.register_class(OrganicWeightsOperator)
+	bpy.types.VIEW3D_MT_edit_mesh.append(menu_func)
+	bpy.types.VIEW3D_MT_object.append(menu_func)
+	bpy.types.VIEW3D_MT_paint_weight.append(menu_func)
 
 def unregister():
+	bpy.types.VIEW3D_MT_edit_mesh.remove(menu_func)
+	bpy.types.VIEW3D_MT_object.remove(menu_func)
+	bpy.types.VIEW3D_MT_paint_weight.remove(menu_func)
 	bpy.utils.unregister_class(OrganicWeightsOperator)

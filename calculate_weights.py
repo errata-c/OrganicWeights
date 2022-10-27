@@ -11,60 +11,77 @@ def sech(value):
 def sech_pow(value, factor):
 	return pow(sech(value), factor)
 
-class LayerData:
-	def __init__(self):
-		# Shortest distance from the node at index.
-		self.distance = float_info.max
-		# Node index this layer data is associated with.
-		self.index = -1
-
 # Node to represent a single vertex in the mesh.
 class VNode:
 	max_layers = 4
 
 	def __init__(self, index):
-		# Group data for graph traversal.
-		self.group = 0
+		# Tag for graph traversal
+		self.tag = 0
 		self.index = index
 
-		# Layers
-		self.layers = [LayerData() for _ in range(self.max_layers)]
-		self.temp = LayerData()
+		# Layer data
+		self.distances = []
+		self.groups = []
 
-	# Clear the temp value
-	def clear_temp(self):
-		self.temp = LayerData()
-
-	# Update the temp value
-	def set_temp(self, dist, index):
-		self.temp.distance = dist
-		self.temp.index = index
-
-	# Merge the temporary layer
-	def merge_temp(self):
-		# Assume that the layers are already in ascending order, maintain that order after insertion.
-		loc = self.max_layers
-		for i in range(len(self.layers)):
-			layer = self.layers[i]
-
-			if self.temp.distance < layer.distance:
-				loc = i
-				break
+	def in_range(self, dist):
+		if len(self.distances) < 4:
+			return True
 		
-		# Early exit, no insertion
-		if loc == self.max_layers:
-			return
-
-		# Shift everything down to make room for insertion
-		prior = self.layers[loc]
-		for i in range(loc+1, len(self.layers)):
-			tmp = self.layers[i]
-			self.layers[i] = prior
-			prior = tmp
+		return self.distances[-1] > dist
+	
+	def find_group(self, group):
+		for i in range(len(self.groups)):
+			if self.groups[i] == group:
+				return i
+		return len(self.groups)
+	
+	def get_distance(self, group):
+		return self.distances[self.groups.index(group)]
+	
+	def sort(self):
+		p = len(self.distances)-2
+		while p >= 0 and self.distances[p+1] < self.distances[p]:
+			tmp_dist = self.distances[p]
+			tmp_group = self.groups[p]
+			
+			self.distances[p] = self.distances[p+1]
+			self.groups[p] = self.groups[p+1]
+			
+			self.distances[p+1] = tmp_dist
+			self.groups[p+1] = tmp_group
+	
+	# Make sure max layers is not exceeded
+	def trim_excess(self):
+		if len(self.distances) > self.max_layers:
+			self.distances.pop()
+			self.groups.pop()
+	
+	# Prepare for a new graph traversal
+	def initialize_group(self, group):
+		self.distances.insert(0, 0.0)
+		self.groups.insert(0, group)
 		
-		self.layers[loc] = self.temp
-
-		self.clear_temp()
+		self.trim_excess() 
+	
+	# Update or insert a value
+	def insert(self, dist, group):
+		loc = self.find_group(group)
+		if loc == len(self.groups):
+			# If the group is not already in the list, append the new values
+			
+			self.distances.append(dist)
+			self.groups.append(group)
+		else:
+			# Otherwise, just update the old value
+			
+			self.distances[loc] = min(self.distances[loc], dist)
+		
+		# Maintain ordering
+		self.sort()
+		
+		self.trim_excess()
+		
 
 # Graph of all the vertices
 class VGraph:
@@ -74,28 +91,24 @@ class VGraph:
 		self.mesh.verts.ensure_lookup_table()
 		self.mesh.edges.ensure_lookup_table()
 		
-		# Is index_update necessary?
-		#self.mesh.verts.index_update()
-		#self.mesh.edges.index_update()
+		# Is index_update necessary? I'm just gonna do it, we can check later if necessary.
+		self.mesh.verts.index_update()
+		self.mesh.edges.index_update()
 
 		# Create the nodes
 		self.nodes = [VNode(i) for i in range(len(self.mesh.verts))]
 		
-		# Reserved value for group ids. Monotonic increasing.
-		self.tgroup = 0
+		# Reserve tag value for graph traversal
+		self.ntag = 0
 	
 	# Generate a new group tag for the graph traversal.
-	def next_group(self):
-		self.tgroup += 1
-		return self.tgroup
+	def next_tag(self):
+		self.ntag += 1
+		return self.ntag
 
-	def branch_from(self, vertex_index, bone_index):
+	def branch_from(self, vertex_index, group):
 		# Branch out from the vertex at index, calculating the distance from that vertex to all reachable vertices.
 		# Then, once the distances are calculated, merge into the layers already done.
-
-		# Clear temp values
-		for node in self.nodes:
-			node.clear_temp()
 		
 		# Two queues:
 		#   One for the current set of nodes to process.
@@ -105,19 +118,23 @@ class VGraph:
 		
 		queue = []
 		squeue = []
-		squeue.append(self.nodes[vertex_index])
-		squeue[0].set_temp(0.0, bone_index)
-
+		
+		first_node = self.nodes[vertex_index]
+		first_node.initialize_group(group)
+		
+		squeue.append(first_node)
+		
 		while len(squeue) > 0:
 			# Swap the secondary with the primary
 			queue, squeue = squeue, queue
-			
-			cgroup = self.next_group()
 
-			# Empty the queue.
+			# Get a tag value
+			ctag = self.next_tag()
+
+			# Empty the queue
 			while len(queue) > 0:
 				node = queue.pop()
-				ndist = node.temp.distance
+				dist = node.get_distance(group)
 				
 				# Get the vertex paired with this node
 				pvert = self.mesh.verts[node.index]
@@ -128,20 +145,16 @@ class VGraph:
 					onode = self.nodes[overt.index]
 					
 					# Add length of edge to current distance value
-					summed_distance = node.temp.distance + link.calc_length()
+					summed_distance = dist + link.calc_length()
 					
-					# If summed distance is less than value currently stored in adjacent node, add node to squeue for processing.
-					if summed_distance < onode.temp.distance:
-						onode.set_temp(summed_distance, bone_index)
+					# If the value will fit, add it in.
+					if onode.in_range(summed_distance):
+						onode.insert(summed_distance, group)
 						
-						# Group check so we don't add duplicates to squeue.
-						if onode.group != cgroup:
+						# Tag check so we don't add duplicates to squeue.
+						if onode.tag != ctag:
 							squeue.append(onode)
-							onode.group = cgroup
-
-		# Update node's layer values
-		for node in self.nodes:
-			node.merge_temp()
+							onode.tag = ctag
 
 # The actual operator implementation. Uses the above classes.
 class OrganicWeightsOperator(bpy.types.Operator):
@@ -170,8 +183,6 @@ class OrganicWeightsOperator(bpy.types.Operator):
 		)
 	
 	def execute(self, context):
-		print("Executed the OrganicWeightsOperator!")
-	
 		mesh_obj = context.active_object
 		mesh = mesh_obj.data
 		
@@ -209,6 +220,8 @@ class OrganicWeightsOperator(bpy.types.Operator):
 		
 		# Process all the vertex groups!
 		for group_index, verts in enumerate(vgroups):
+			print(f"Processing group {group_index} out of {len(vgroups)}.")
+			
 			for vertex_index in verts:
 				graph.branch_from(vertex_index, group_index)
 		
@@ -246,8 +259,6 @@ class OrganicWeightsOperator(bpy.types.Operator):
 			dvert.clear()
 			for layer, factor in zip(valid, factors):
 				dvert[layer.index] = factor * norm
-			
-			print(valid)
 		
 		# Cleanup and apply all the changes.
 		if bmesh_obj.is_wrapped:
